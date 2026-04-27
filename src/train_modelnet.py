@@ -24,7 +24,7 @@ from pretrain import pretrain
 def main() -> None:
     settings = training_configs(file_tag='modelnet_run',
                                 mb_size=12,
-                                epoch_size=5,
+                                epoch_size=50,
                                 report_size=20,
                                 alpha=0.1,
                                 m=0.5,
