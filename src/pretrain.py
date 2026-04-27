@@ -26,6 +26,7 @@ try:
 except Exception:
     visdom = None  # noqa: F811
 from log import log
+import wandb_logger
 
 
 import test_rt,test_match
@@ -50,6 +51,8 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
 
     tag=str(settings.to_string())
     plotter = VisdomLinePlotter(env_name='PRETRAIN ' + tag + '-' + ('1' if pretrain else '2'))
+
+    wandb_logger.init(config=vars(settings), name=tag)
 
     train_mask, val_mask = create_test_validation_masks(dataset_train, VALIDATION_SPLIT)
     val_loader = DataLoader(dataset_train, batch_sampler=BatchSampler(TripletSampler(len(dataset_train) - 1, val_mask), batch_size=settings.mb_size, drop_last=True))
@@ -77,11 +80,32 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
         plotter.plot('avg similarity positive ', 'validation', 'avg similarity positive  file '+tag, epoch, avg_pos_v)
         plotter.plot('avg similarity negative ', 'validation', 'avg similarity negative file '+tag, epoch, avg_neg_v)
         plotter.plot('confidence loss ', 'validation', 'confidence loss file '+tag, epoch, c_valid_loss)
-        
+
+        wandb_logger.log({
+            'epoch': epoch,
+            'train/label_loss': l_train_loss,
+            'train/descriptor_loss': d_train_loss,
+            'train/accuracy': acc_train,
+            'train/avg_pos_dist': avg_pos_t,
+            'train/avg_neg_dist': avg_neg_t,
+            'train/confidence_loss': c_train_loss,
+            'val/label_loss': l_valid_loss,
+            'val/descriptor_loss': d_valid_loss,
+            'val/accuracy': acc_loss,
+            'val/avg_pos_dist': avg_pos_v,
+            'val/avg_neg_dist': avg_neg_v,
+            'val/confidence_loss': c_valid_loss,
+        }, step=epoch)
+
         if epoch%5==4 or pretrain is not True:
             if dataset_test is not None:
                 try:
-                    test_rt.test(settings, model, dataset_test)
+                    test_metrics = test_rt.test(settings, model, dataset_test)
+                    if test_metrics:
+                        wandb_logger.log({'epoch': epoch,
+                                          **{'eval_modelnet/' + k: v
+                                             for k, v in test_metrics.items()}},
+                                         step=epoch)
                 except Exception as exc:
                     print('test_rt skipped due to error:', exc)
             if dataset_test_match is not None:
@@ -93,6 +117,7 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
             torch.save(model.state_dict(), get_model_name(pretrain, settings, epoch=str(epoch)))
 
     log("pretraining done.",str(settings.to_string()))
+    wandb_logger.finish()
 
     return model
 

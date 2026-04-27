@@ -82,14 +82,57 @@ def get_random_transformation():
 
     return translation_ab, R_ab, euler_ab
 
-class ModelNetDataset(Dataset):
+def _parse_int_csv(value):
+    if value is None:
+        return None
+    out = []
+    for chunk in str(value).split(','):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        out.append(int(chunk))
+    return out or None
 
-    def __init__(self, root, train,mode):
+
+class ModelNetDataset(Dataset):
+    """ModelNet point-cloud registration dataset.
+
+    Parameters
+    ----------
+    root : str
+        Path to the ModelNet root (must end with '/'), with an
+        ``object_names.txt`` listing every category name.
+    train : bool
+        Train or test split selector.
+    mode : {'noise', 'patch', 'patchnoise'}
+        Augmentation mode used for the saved patches; matches the
+        original Graphite codebase.
+    split : str, optional
+        Class-id partitioning between the train and test splits:
+
+        * ``'all'``      — every class appears in both train and test
+                          (Graphite's original ``noise`` behaviour;
+                          good for ModelNet10).
+        * ``'dcp'``      — DCP / Graphite-paper protocol on
+                          ModelNet40: first 20 categories for training,
+                          last 20 for testing (unseen categories).
+        * ``'first11'``  — original ``patch``-mode behaviour
+                          (train classes 0-10, test classes 20-30).
+        * ``'custom'``   — read class indices from environment
+                          variables ``GRAPHITE_TRAIN_CLASSES`` and
+                          ``GRAPHITE_TEST_CLASSES`` (comma-separated).
+
+        Defaults to the value of ``GRAPHITE_MODELNET_SPLIT`` if set,
+        otherwise ``'dcp'`` when ``object_names.txt`` has >= 40
+        categories and ``'all'`` otherwise.
+    """
+
+    def __init__(self, root, train, mode, split=None):
 
         self.test_train = 'train/' if train else 'test/'
-        if not (mode == 'patch' or  mode == 'noise' or mode== 'patchnoise'):
+        if not (mode == 'patch' or mode == 'noise' or mode == 'patchnoise'):
             print('wrong mode')
-        self.mode=mode+'/'
+        self.mode = mode + '/'
         self.train = train
 
         with open(root + 'object_names.txt') as f:
@@ -97,14 +140,33 @@ class ModelNetDataset(Dataset):
             self.object_names = [x.replace('\n', '') for x in self.object_names if len(x) > 3]
 
         n_classes = len(self.object_names)
-        if self.mode == 'patch/':
+        if split is None:
+            split = os.environ.get('GRAPHITE_MODELNET_SPLIT')
+        if split is None:
+            split = 'dcp' if n_classes >= 40 else 'all'
+        self.split = split
+
+        if split == 'all':
+            self.object_ids = list(range(n_classes))
+        elif split == 'dcp':
+            train_ids = list(range(min(20, n_classes)))
+            test_ids = list(range(min(20, n_classes), n_classes))
+            self.object_ids = train_ids if self.train else (test_ids or train_ids)
+        elif split == 'first11':
             train_n = min(11, n_classes)
-            self.object_ids = list(range(train_n)) if self.train else list(range(min(n_classes - 1, 20),
-                                                                                  min(n_classes, 31)))
+            test_ids = list(range(min(n_classes - 1, 20), min(n_classes, 31)))
+            self.object_ids = list(range(train_n)) if self.train else test_ids
             if not self.object_ids:
                 self.object_ids = list(range(n_classes))
-        else:  # 'noise/' or 'patchnoise/'
-            self.object_ids = list(range(min(13, n_classes)))
+        elif split == 'custom':
+            train_ids = _parse_int_csv(os.environ.get('GRAPHITE_TRAIN_CLASSES'))
+            test_ids = _parse_int_csv(os.environ.get('GRAPHITE_TEST_CLASSES'))
+            if train_ids is None or test_ids is None:
+                raise ValueError("split='custom' requires GRAPHITE_TRAIN_CLASSES "
+                                 "and GRAPHITE_TEST_CLASSES env vars")
+            self.object_ids = train_ids if self.train else test_ids
+        else:
+            raise ValueError('Unknown split: {!r}'.format(split))
 
         self.root = root
         self.processed_paths = self.processed_file_names()

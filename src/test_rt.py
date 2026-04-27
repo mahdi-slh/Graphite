@@ -41,6 +41,15 @@ def test(settings, net, test_loader):
     test_t_rmse_ab = np.sqrt(test_t_mse_ab)
     test_t_mae_ab = np.mean(np.abs(test_translations_ab - test_translations_grf_pred))
 
+    metrics = {
+        'graphite/rot_MSE': float(test_r_mse_ab),
+        'graphite/rot_RMSE': float(test_r_rmse_ab),
+        'graphite/rot_MAE': float(test_r_mae_ab),
+        'graphite/trans_MSE': float(test_t_mse_ab),
+        'graphite/trans_RMSE': float(test_t_rmse_ab),
+        'graphite/trans_MAE': float(test_t_mae_ab),
+    }
+
     log('Graphite rot_MSE: %f, rot_RMSE: %f, '
                   'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
                   % (test_r_mse_ab, test_r_rmse_ab,
@@ -56,10 +65,21 @@ def test(settings, net, test_loader):
     test_t_rmse_ab = np.sqrt(test_t_mse_ab)
     test_t_mae_ab = np.mean(np.abs(test_translations_ab - test_translations_icp_pred))
 
+    metrics.update({
+        'icp/rot_MSE': float(test_r_mse_ab),
+        'icp/rot_RMSE': float(test_r_rmse_ab),
+        'icp/rot_MAE': float(test_r_mae_ab),
+        'icp/trans_MSE': float(test_t_mse_ab),
+        'icp/trans_RMSE': float(test_t_rmse_ab),
+        'icp/trans_MAE': float(test_t_mae_ab),
+    })
+
     log('Grap+ICP rot_MSE: %f, rot_RMSE: %f, '
                   'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
                   % (test_r_mse_ab, test_r_rmse_ab,
                      test_r_mae_ab, test_t_mse_ab, test_t_rmse_ab, test_t_mae_ab),str(settings.to_string()))
+
+    return metrics
 
 def test_one_epoch(settings, net, test_data):
 

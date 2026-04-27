@@ -8,24 +8,33 @@ Reference implementation of:
 
 A graph neural network for learning local point-cloud descriptors and
 keypoints. Originally written for PyTorch 1.1 / CUDA 9.0 / Python 3.6; this
-fork brings it up to PyTorch 2.x / CUDA 11.8 / Python 3.10 and makes the
-training and evaluation pipelines reproducible end-to-end on ModelNet10 and
-the 3DMatch geometric-registration benchmark.
+fork brings it up to PyTorch 2.x / CUDA 11.8 / Python 3.10 and reproduces the
+paper's ModelNet40 protocol plus the 3DMatch geometric-registration
+benchmark.
+
+> **Note on training stages.** The original paper describes three stages —
+> SynPrim pretraining → COCO pretraining → ModelNet finetuning. Neither
+> SynPrim nor the COCO patch generator ship with the public repo, and the
+> authors note that the SynPrim stage adds little. This fork therefore
+> trains directly on ModelNet from scratch.
 
 ```
 src/
-├── train_modelnet.py        train on ModelNet10
+├── train_modelnet.py        train on ModelNet (40 or 10)
 ├── evaluate_modelnet_rt.py  ModelNet rigid-registration eval (DCP-style)
 ├── evaluate_match3d.py      3DMatch geometric-registration eval
 ├── params.py                paths + training_configs
 ├── _compat.py               Open3D / NumPy / SciPy compatibility shims
+├── wandb_logger.py          optional W&B logging
 ├── model.py                 Net + NetAE
 ├── pretrain.py              training loop
 ├── modelnetdataset.py       ModelNet pair generation
 ├── match3Ddataset.py        3DMatch fragment loader (random-keypoint fallback)
 ├── test_rt.py / test_match.py
 └── …
-scripts/download_match3d.sh  one-shot 3DMatch downloader
+scripts/
+├── download_modelnet40.sh   one-shot ModelNet40 downloader
+└── download_match3d.sh      one-shot 3DMatch downloader
 data/{modelnet,match3d}/     datasets land here
 models/                      trained checkpoints
 logs/                        per-tag training logs
@@ -59,7 +68,18 @@ The pinned versions are dictated by the `torch-{scatter,sparse,cluster}`
 wheels at `data.pyg.org`, which only exist for specific torch / CUDA combos.
 Nothing is installed system-wide.
 
-## 2. Dataset — ModelNet10
+## 2. Dataset
+
+### ModelNet40 (paper protocol — recommended)
+
+```bash
+./scripts/download_modelnet40.sh
+```
+
+This drops ModelNet40 (`airplane/`, `bathtub/`, …, `xbox/`) into
+`data/modelnet/` and writes `object_names.txt`. Total ~450 MB.
+
+### ModelNet10 (smaller / faster smoke runs)
 
 ```bash
 mkdir -p data/modelnet && cd data/modelnet
@@ -71,29 +91,60 @@ printf 'bathtub\nbed\nchair\ndesk\ndresser\nmonitor\nnight_stand\nsofa\ntable\nt
     > object_names.txt
 ```
 
-ModelNet40 works the same way — just write a 40-line `object_names.txt`.
-
 ## 3. Train
 
 ```bash
 conda activate graphite
-python src/train_modelnet.py
+python src/train_modelnet.py            # paper-protocol defaults
 ```
 
-Defaults are set in `src/train_modelnet.py` (5 epochs, mb_size=12, lr=1e-4,
-`data_mode='noise'`). Edit that file to change them. The first run lazily
-preprocesses each `.off` mesh into patch graphs and caches them under
-`data/modelnet/processed/`; later runs skip preprocessing.
+Defaults follow Table 1 of the paper: `data_mode=noise`, `mb_size=12`,
+`lr=1e-4`, `epochs=50`, and the **DCP unseen-categories split** (first 20
+categories train, last 20 test) — auto-selected when `object_names.txt`
+contains 40 categories. On ModelNet10 the split falls back to using all 10
+categories for both train and test (no unseen-category generalization
+possible with only 10 classes).
 
-For a quick smoke test, cap meshes per class:
+The first run lazily preprocesses each `.off` mesh into patch graphs and
+caches the result under `data/modelnet/processed/`; later runs skip
+preprocessing. After every epoch the script runs the ModelNet
+rigid-registration eval (`test_rt.test`) and saves a checkpoint to
+`models/trained_<tag>.model`.
+
+Quick smoke test (caps meshes per class):
 
 ```bash
 GRAPHITE_MAX_TRAIN_PER_CLASS=3 GRAPHITE_MAX_TEST_PER_CLASS=2 \
-    python src/train_modelnet.py
+    python src/train_modelnet.py --epoch-size 1
 ```
 
-After every epoch the script runs the ModelNet rigid-registration eval and
-writes a checkpoint to `models/trained_<tag>.model`.
+### CLI flags (most useful)
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--epoch-size` | 50 | Number of epochs |
+| `--mb-size` | 12 | Must be a multiple of 3 (triplet sampling) |
+| `--learning-rate` | 1e-4 | Adam lr |
+| `--data-mode` | `noise` | `noise` / `patch` / `patchnoise` |
+| `--split` | auto | `dcp` (first 20 / last 20), `all`, `first11`, `custom` |
+| `--resume PATH` | – | Continue from a saved `.model` |
+| `--file-tag` | `modelnet_run` | Used in checkpoint and log filenames |
+
+### Optional: Weights & Biases tracking
+
+Training logs every per-epoch loss and ModelNet eval metric to W&B if it's
+configured. The default project is `graphite-registration`.
+
+```bash
+pip install wandb && wandb login
+python src/train_modelnet.py
+
+# Override project / entity if you want:
+WANDB_PROJECT=my-project python src/train_modelnet.py
+
+# WANDB_MODE=disabled to turn it off; the helper is also a no-op if `wandb`
+# isn't installed.
+```
 
 ### Useful environment variables
 
@@ -101,8 +152,11 @@ writes a checkpoint to `models/trained_<tag>.model`.
 |----------|--------|
 | `MODELNET_DIR` | ModelNet root (default `data/modelnet/`) |
 | `MATCH3D_DIR` | 3DMatch root (default `data/match3d/`) |
+| `GRAPHITE_MODELNET_SPLIT` | Override split selection (`all` / `dcp` / `first11` / `custom`) |
+| `GRAPHITE_TRAIN_CLASSES` / `GRAPHITE_TEST_CLASSES` | Comma-separated class indices when `split=custom` |
 | `GRAPHITE_MAX_TRAIN_PER_CLASS` / `GRAPHITE_MAX_TEST_PER_CLASS` | Cap meshes per class during preprocessing (0 = no cap) |
 | `GRAPHITE_DATA_ROOT` / `GRAPHITE_MODELS_ROOT` / `GRAPHITE_LOG_ROOT` | Override default `data/`, `models/`, `logs/` |
+| `WANDB_PROJECT` / `WANDB_MODE` | Standard W&B knobs (set `WANDB_MODE=disabled` to silence it) |
 
 ## 4. Evaluation
 
@@ -115,12 +169,14 @@ Two benchmarks are wired up. Both load a checkpoint produced by
 python src/evaluate_modelnet_rt.py \
     --model models/trained_modelnet_run_noise_mb12_a0.1_m0.5_lr0.00014.model \
     --data-mode noise            # patch / noise / patchnoise
+    # --split dcp                # auto-selected on ModelNet40
 ```
 
 Reports rotation MSE/RMSE/MAE (degrees) and translation MSE/RMSE/MAE for raw
-descriptor matches and ICP-refined results — the metrics from the DCP paper
-this code is based on. Pass `--max-pairs N` to evaluate only the first `N`
-test pairs.
+descriptor matches and ICP-refined results — the metrics from the DCP paper.
+Use `--split` to evaluate on a different category partition than the one
+auto-selected from `object_names.txt`. Pass `--max-pairs N` to evaluate only
+the first `N` test pairs.
 
 ### 4.2 3DMatch geometric registration benchmark
 

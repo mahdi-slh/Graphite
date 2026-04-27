@@ -18,3 +18,4 @@ logs/
 src/temp.off
 *.model
 *.log
+wandb/

@@ -1,58 +1,107 @@
-"""Minimal end-to-end training script for the Graphite codebase on ModelNet.
+"""Train Graphite on ModelNet for rigid registration.
 
-This script bypasses the (unavailable) COCO and 3DMatch datasets and trains
-the GNN keypoint/descriptor network directly on ModelNet pairs.
+Defaults follow the protocol used in the Graphite paper (Saleh et al., 3DV
+2020) and the DCP paper it is built on:
+
+* ModelNet40, first 20 categories for training, last 20 for testing
+  (``split='dcp'`` / unseen categories).
+* ``data_mode='noise'`` — random rigid transform + Gaussian noise.
+* TripletMarginLoss, Adam, lr=1e-4, mb_size=12.
+
+The original three-stage pipeline (synthetic primitives pretraining → COCO
+pretraining → ModelNet finetuning) is not reimplemented: the public repo
+ships neither the SynPrim dataset nor the COCO patch generator, and the
+authors note that the SynPrim stage adds little.  We train directly on
+ModelNet from scratch, which is the most useful single configuration for
+reproducing Table 1 of the paper.
 
 Usage::
 
-    python train_modelnet.py --data-mode noise --epoch-size 5 --mb-size 12 \
-        --report-size 20 --learning-rate 1e-4
+    python train_modelnet.py --epoch-size 50
 
-Environment variable ``MODELNET_DIR`` overrides the dataset location.
+CLI flags inherit from ``training_configs.input_params``; additional
+ModelNet-specific flags are documented below.
 """
 from __future__ import annotations
 
-# IMPORTANT: import params first so that the open3d / numpy compatibility
-# shims are applied before anything else touches those libraries.
-import params  # noqa: F401  (side effects)
+import argparse
+import os
+
+import params  # noqa: F401  -- side effect: applies _compat shims
 from params import training_configs, MODELNET_DIR
 
 from modelnetdataset import ModelNetDataset
 from pretrain import pretrain
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description='Train Graphite on ModelNet (paper-protocol defaults).')
+    p.add_argument('--file-tag', default='modelnet_run',
+                   help='Tag used in checkpoint and log filenames.')
+    p.add_argument('--mb-size', type=int, default=12,
+                   help='Batch size; must be a multiple of 3 (triplet sampling).')
+    p.add_argument('--epoch-size', type=int, default=50,
+                   help='Number of epochs.')
+    p.add_argument('--report-size', type=int, default=100)
+    p.add_argument('--alpha', type=float, default=0.1,
+                   help='Weight of the label loss term.')
+    p.add_argument('--m', type=float, default=0.5,
+                   help='Triplet-margin loss margin.')
+    p.add_argument('--learning-rate', dest='learning_rate', type=float,
+                   default=1e-4)
+    p.add_argument('--data-mode', default='noise',
+                   choices=['noise', 'patch', 'patchnoise'])
+    p.add_argument('--split', default=None,
+                   choices=[None, 'all', 'dcp', 'first11', 'custom'],
+                   help=('Train/test category partition. '
+                         "Default: 'dcp' for ModelNet40, 'all' for ModelNet10."))
+    p.add_argument('--data-root', default=MODELNET_DIR,
+                   help='ModelNet directory (default: $MODELNET_DIR).')
+    p.add_argument('--multi-gpu', dest='multi_gpu', type=int, default=0)
+    p.add_argument('--resume', default=None,
+                   help='Optional path to a checkpoint to resume from.')
+    return p.parse_args()
+
+
 def main() -> None:
-    settings = training_configs(file_tag='modelnet_run',
-                                mb_size=12,
-                                epoch_size=50,
-                                report_size=20,
-                                alpha=0.1,
-                                m=0.5,
-                                learning_rate=1e-4,
-                                data_mode='noise',
-                                multi_gpu=0)
-    settings.input_params()
+    args = parse_args()
+
+    settings = training_configs(file_tag=args.file_tag,
+                                mb_size=args.mb_size,
+                                epoch_size=args.epoch_size,
+                                report_size=args.report_size,
+                                alpha=args.alpha,
+                                m=args.m,
+                                learning_rate=args.learning_rate,
+                                data_mode=args.data_mode,
+                                multi_gpu=args.multi_gpu)
 
     print('=== Settings ===')
     for k, v in vars(settings).items():
         print(f'  {k}: {v}')
-    print(f'MODELNET_DIR={MODELNET_DIR}')
+    print(f'  data_root: {args.data_root}')
+    print(f'  split:     {args.split or "auto"}')
 
     print('Building train split...')
-    train_set = ModelNetDataset(MODELNET_DIR, train=True, mode=settings.data_mode)
+    train_set = ModelNetDataset(args.data_root, train=True,
+                                mode=settings.data_mode, split=args.split)
+    print(f'  classes: {train_set.object_ids}')
     print(f'  train pairs (interleaved): {len(train_set)}')
 
     print('Building test split...')
-    test_set = ModelNetDataset(MODELNET_DIR, train=False, mode=settings.data_mode)
-    print(f'  test items:               {len(test_set)}')
+    test_set = ModelNetDataset(args.data_root, train=False,
+                               mode=settings.data_mode, split=args.split)
+    print(f'  classes: {test_set.object_ids}')
+    print(f'  test items: {len(test_set)}')
 
-    print('Starting training (pretrain stage 2 - ModelNet only)...')
+    print('Starting training...')
     pretrain(settings,
              dataset_train=train_set,
              dataset_test=test_set,
              dataset_test_match=None,
              pretrain=False,
-             model_path=None)
+             model_path=args.resume)
 
 
 if __name__ == '__main__':

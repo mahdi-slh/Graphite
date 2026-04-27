@@ -36,6 +36,10 @@ def parse_args():
     p.add_argument('--mb-size', type=int, default=12)
     p.add_argument('--data-root', default=MODELNET_DIR,
                    help='ModelNet directory; defaults to $MODELNET_DIR / data/modelnet/')
+    p.add_argument('--split', default=None,
+                   choices=[None, 'all', 'dcp', 'first11', 'custom'],
+                   help=('Test class partition. '
+                         "Default: 'dcp' on ModelNet40, 'all' on ModelNet10."))
     p.add_argument('--max-pairs', type=int, default=0,
                    help='If >0, only evaluate this many test pairs')
     return p.parse_args()
@@ -51,9 +55,12 @@ def main():
                                 mb_size=args.mb_size,
                                 data_mode=args.data_mode)
 
-    print('Loading test dataset from {} (mode={}) ...'.format(args.data_root, args.data_mode))
-    dataset_test = ModelNetDataset(args.data_root, train=False, mode=args.data_mode)
-    print('Test pairs:', len(dataset_test))
+    print('Loading test dataset from {} (mode={}, split={}) ...'.format(
+        args.data_root, args.data_mode, args.split or 'auto'))
+    dataset_test = ModelNetDataset(args.data_root, train=False,
+                                   mode=args.data_mode, split=args.split)
+    print('Test classes:', dataset_test.object_ids)
+    print('Test pairs:  ', len(dataset_test))
 
     if args.max_pairs and args.max_pairs > 0:
         dataset_test.data = dataset_test.data[: args.max_pairs]
