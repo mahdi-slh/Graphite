@@ -162,34 +162,3 @@ settings = training_configs(file_tag='modelnet_run', mb_size=12,
 model = init_model(utils.get_model_name(False, settings), settings)
 model.eval()
 ```
-
-## 6. What changed vs. the original repo
-
-* **PyTorch / PyG / Open3D upgraded** to 2.4.1 / 2.5.3 / 0.18.0; CUDA 11.8.
-* **`src/_compat.py`** — runtime shims for `numpy.asscalar`, SciPy
-  `Rotation.from_dcm`, and the Open3D `registration` module move
-  (`o3d.registration → o3d.pipelines.registration`, including signature
-  changes to `RANSACConvergenceCriteria` and
-  `registration_ransac_based_on_feature_matching`).
-* **`src/params.py`** — reconstructed (was missing from the public repo);
-  defines paths and `training_configs`.
-* **`src/train_modelnet.py`** — minimal entry point that bypasses the
-  unavailable COCO pretraining stage and trains directly on ModelNet.
-* **`src/match3Ddataset.py`** — generates seeded random keypoints when the
-  3DMatch keypoint files are absent, and dynamically derives scene length
-  from the fragments on disk.
-* **`src/test_match.py`** — refactored to read `gt.log`, compute per-scene
-  recall, and emit `graphite.log` for the toolbox.
-* **`evaluate_modelnet_rt.py` / `evaluate_match3d.py`** — clean CLI entry
-  points for the two benchmarks.
-* **`scripts/download_match3d.sh`** — downloads + reorganises the 3DMatch
-  test split.
-* **Visdom is optional** — training no longer blocks if no Visdom server is
-  running.
-
-## 7. Legacy notes
-
-`src/main.py` is the original three-stage entry point (COCO pretrain →
-ModelNet finetune → 3DMatch finetune). It still imports cleanly, but the
-COCO and 3DMatch-with-keypoints stages need data we don't ship; use the
-ModelNet entry point above instead.
