@@ -1,5 +1,11 @@
 # Graphite
 
+Reference implementation of:
+
+> **Graphite: GRAPH-Induced feaTure Extraction for Point Cloud Registration**
+> Mahdi Saleh, Shervin Dehghani, Nassir Navab, Benjamin Busam, Federico Tombari
+> *International Conference on 3D Vision (3DV)*, IEEE, 2020.
+
 A graph neural network for learning local point-cloud descriptors and
 keypoints. Originally written for PyTorch 1.1 / CUDA 9.0 / Python 3.6; this
 fork brings it up to PyTorch 2.x / CUDA 11.8 / Python 3.10 and makes the
@@ -113,16 +119,8 @@ python src/evaluate_modelnet_rt.py \
 
 Reports rotation MSE/RMSE/MAE (degrees) and translation MSE/RMSE/MAE for raw
 descriptor matches and ICP-refined results — the metrics from the DCP paper
-this code is based on.
-
-Sample output (5 epochs, ~50 train meshes/class):
-
-```
-Graphite rot_RMSE: 13.07°  rot_MAE: 5.48°   trans_RMSE: 0.081  trans_MAE: 0.062
-Grap+ICP rot_RMSE: 12.73°  rot_MAE: 1.56°   trans_RMSE: 0.032  trans_MAE: 0.009
-```
-
-Pass `--max-pairs N` to evaluate only the first `N` test pairs.
+this code is based on. Pass `--max-pairs N` to evaluate only the first `N`
+test pairs.
 
 ### 4.2 3DMatch geometric registration benchmark
 
@@ -143,12 +141,6 @@ in the standard Choi/Zhou/Koltun `.log` format. That file is a drop-in input
 for the Matlab `evaluate.m` script in
 [3dmatch-toolbox](https://github.com/andyzeng/3dmatch-toolbox/tree/master/evaluation/geometric-registration)
 if you want precision/recall instead of keypoint recall.
-
-Sample output (5-epoch ModelNet10 model, kitchen scene):
-
-```
-kitchen : recall 78.26%  avg_matches=40  pairs=506
-```
 
 Pre-computed keypoint files (`01_Keypoints/cloud_bin_XKeypoints.txt`) are not
 part of the public 3DMatch download. When missing, the loader falls back to
