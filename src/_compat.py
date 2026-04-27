@@ -39,6 +39,43 @@ def _patch_open3d() -> None:
     pc_cls.rotate = rotate_compat  # type: ignore[assignment]
     pc_cls.translate = translate_compat  # type: ignore[assignment]
 
+    # In Open3D 0.10+ the ``registration`` submodule was moved under
+    # ``pipelines.registration`` and several signatures changed.  We expose the
+    # legacy name + wrap the affected calls so the original code keeps working.
+    if not hasattr(o3d, 'registration'):
+        import types
+
+        legacy = types.ModuleType('open3d.registration')
+
+        modern = o3d.pipelines.registration
+        for name in dir(modern):
+            if not name.startswith('_'):
+                setattr(legacy, name, getattr(modern, name))
+
+        original_ransac_criteria = modern.RANSACConvergenceCriteria
+
+        def _ransac_criteria_compat(*args, **kwargs):
+            # ``max_validation`` was removed in Open3D 0.10+; silently drop it.
+            kwargs.pop('max_validation', None)
+            return original_ransac_criteria(*args, **kwargs)
+
+        legacy.RANSACConvergenceCriteria = _ransac_criteria_compat
+
+        original_ransac = modern.registration_ransac_based_on_feature_matching
+
+        def _ransac_feature_compat(source, target, source_feature, target_feature,
+                                   *args, **kwargs):
+            # Old signature did not have ``mutual_filter``; new versions require it.
+            mutual_filter = kwargs.pop('mutual_filter', False)
+            return original_ransac(source, target, source_feature, target_feature,
+                                   mutual_filter, *args, **kwargs)
+
+        legacy.registration_ransac_based_on_feature_matching = _ransac_feature_compat
+
+        o3d.registration = legacy  # type: ignore[attr-defined]
+        import sys as _sys
+        _sys.modules['open3d.registration'] = legacy
+
 
 def _patch_scipy_rotation() -> None:
     """``Rotation`` is a C extension and cannot be monkey-patched directly.

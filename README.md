@@ -8,18 +8,25 @@ ModelNet10.
 
 ```
 src/
-├── train_modelnet.py     ← clean entry point: train on ModelNet
-├── main.py               ← original entry point (COCO → ModelNet → 3DMatch)
-├── params.py             ← reconstructed config / paths / training_configs
-├── _compat.py            ← Open3D / NumPy / SciPy compatibility shims
-├── model.py              ← Net + NetAE (default: NetAE)
-├── pretrain.py           ← training loop (works for COCO and ModelNet)
-├── modelnetdataset.py    ← ModelNet pair generation (patch graphs)
+├── train_modelnet.py        ← clean entry point: train on ModelNet
+├── evaluate_modelnet_rt.py  ← DCP-style ModelNet registration eval
+├── evaluate_match3d.py      ← 3DMatch geometric registration eval
+├── main.py                  ← original entry point (COCO → ModelNet → 3DMatch)
+├── params.py                ← reconstructed config / paths / training_configs
+├── _compat.py               ← Open3D / NumPy / SciPy compatibility shims
+├── model.py                 ← Net + NetAE (default: NetAE)
+├── pretrain.py              ← training loop (works for COCO and ModelNet)
+├── modelnetdataset.py       ← ModelNet pair generation (patch graphs)
+├── match3Ddataset.py        ← 3DMatch fragment loader (with random keypoint fallback)
+├── test_rt.py / test_match.py
 └── …
+scripts/
+└── download_match3d.sh      ← one-shot 3DMatch test split downloader
 data/
-└── modelnet/             ← ModelNet10 lives here
-models/                   ← trained_<tag>.model checkpoints land here
-logs/                     ← per-tag training logs
+├── modelnet/                ← ModelNet10 lives here
+└── match3d/                 ← 3DMatch fragments + eval files
+models/                      ← trained_<tag>.model checkpoints land here
+logs/                        ← per-tag training logs
 ```
 
 ---
@@ -180,7 +187,100 @@ model.eval()
 
 ---
 
-## 6. Troubleshooting
+## 6. Evaluation
+
+Two benchmarks are wired up: ModelNet rigid registration (DCP-style) and the
+3DMatch geometric registration benchmark.  Both load a trained checkpoint
+and operate on the same data layout you just trained on.
+
+### 6.1 ModelNet rigid registration (DCP-style)
+
+Uses the existing test split in `data/modelnet/processed/<mode>/test/`.  Runs
+the trained graph descriptor matcher to predict `(R, t)` for each test pair,
+optionally refined by ICP, then reports rotation MSE/RMSE/MAE (degrees) and
+translation MSE/RMSE/MAE — the same metrics reported in the DCP paper that
+this code is based on.
+
+```bash
+cd src
+MODELNET_DIR=$PWD/../data/modelnet/ \
+python evaluate_modelnet_rt.py \
+    --model ../models/trained_modelnet_run_noise_mb12_a0.1_m0.5_lr0.00014.model \
+    --data-mode noise          # patch / noise / patchnoise
+```
+
+Useful flags:
+
+| Flag | Description |
+|------|-------------|
+| `--model` | Path to the `.model` checkpoint (required) |
+| `--data-mode` | Must match the mode the test split was generated with |
+| `--max-pairs N` | Evaluate only the first `N` test pairs (smoke test) |
+
+Sample output (5-epoch model, ModelNet10, ~50 train meshes/class):
+
+```
+Graphite rot_RMSE: 13.07°  rot_MAE: 5.48°   trans_RMSE: 0.081  trans_MAE: 0.062
+Grap+ICP rot_RMSE: 12.73°  rot_MAE: 1.56°   trans_RMSE: 0.032  trans_MAE: 0.009
+```
+
+### 6.2 3DMatch geometric registration benchmark
+
+The original benchmark from the 3DMatch paper (8 indoor scenes, fragment-pair
+recall).  We provide a one-shot downloader that fetches the official test
+fragments **and** ground-truth `gt.log` files from the Princeton mirror.
+
+```bash
+# (1) download all 8 scenes  (~300 MB)
+./scripts/download_match3d.sh
+# or just one scene:
+SCENES="kitchen" ./scripts/download_match3d.sh
+
+# (2) run the evaluation
+cd src
+MATCH3D_DIR=$PWD/../data/match3d/ \
+python evaluate_match3d.py \
+    --model ../models/trained_modelnet_run_noise_mb12_a0.1_m0.5_lr0.00014.model \
+    --scenes kitchen home1                # default: all 8 scenes
+```
+
+Useful flags / env vars:
+
+| Flag / Var | Effect |
+|------------|--------|
+| `--model` | Trained checkpoint path (required) |
+| `--scenes a b c` | Subset of the 8 scenes to evaluate |
+| `MATCH3D_DIR` | Root for fragments + eval files (default: `data/match3d/`) |
+| `GRAPHITE_MATCH3D_NUM_KEYPOINTS` | Random keypoints per fragment when no `01_Keypoints/` files exist (default 5000) |
+| `GRAPHITE_MATCH3D_SCENES` | CSV list of scenes (alternative to `--scenes`) |
+
+What it produces:
+
+* Per-scene keypoint-match recall (the metric reported in the paper) and the
+  average across all evaluated pairs, written to `logs/<tag>.log`.
+* `data/match3d/eval_files/<scene>/graphite.log` — predicted transformations
+  in the standard Choi/Zhou/Koltun `.log` format, ready to drop into the
+  Matlab `evaluate.m` script from the
+  [3dmatch-toolbox](https://github.com/andyzeng/3dmatch-toolbox/tree/master/evaluation/geometric-registration)
+  if you want the precision/recall metric instead of keypoint recall.
+
+Sample output (5-epoch ModelNet10 model, kitchen scene):
+
+```
+kitchen : recall 78.26%  avg_matches=40  pairs=506
+```
+
+> Note: pre-computed keypoints (`01_Keypoints/cloud_bin_XKeypoints.txt`) are
+> *not* part of the public 3DMatch download.  When the directory is missing,
+> we fall back to uniformly random keypoints (configurable via
+> `GRAPHITE_MATCH3D_NUM_KEYPOINTS`, seeded for reproducibility).  If you have
+> the 3DMatch intermediate files you can drop them into
+> `data/match3d/fragments/<scene>/01_Keypoints/` and they'll be picked up
+> automatically.
+
+---
+
+## 7. Troubleshooting
 
 * **`OSError: libcudart.so.11.0: cannot open …`** — you activated a different
   conda env or are using a system Python.  `conda activate graphite` first.
@@ -197,7 +297,7 @@ model.eval()
 
 ---
 
-## 7. What changed vs. the original repo
+## 8. What changed vs. the original repo
 
 * **Added** `src/params.py` — was missing entirely; reconstructed from the
   symbols every other file imports.  Provides paths, hyper-parameter
@@ -207,9 +307,27 @@ model.eval()
   * `PointCloud.select_down_sample` → `select_by_index`
   * `PointCloud.rotate(R, False)` → `rotate(R, center=(0,0,0))`
   * `np.asscalar`, `np.int`, `np.float`, `np.bool` shims
+  * `o3d.registration` re-exposed as an alias for `o3d.pipelines.registration`,
+    plus a wrapper that drops the removed `max_validation` argument from
+    `RANSACConvergenceCriteria` and adds the new mandatory `mutual_filter`
+    argument to `registration_ransac_based_on_feature_matching`.
 * **Added** `src/train_modelnet.py` — clean entry point that trains on
   ModelNet directly, skipping the COCO / 3DMatch / FAT pre-training stages
   whose datasets are no longer readily available.
+* **Added** `src/evaluate_modelnet_rt.py` and `src/evaluate_match3d.py` —
+  single-purpose CLI entry points for the two evaluation routines.
+* **Added** `scripts/download_match3d.sh` — downloads the 8 official 3DMatch
+  test scenes (fragments + `gt.log`) and lays them out under
+  `data/match3d/` with the short scene names Graphite expects.
+* **Hardened** `Match3DDataset`:
+  * Auto-detects the number of fragments per scene.
+  * Generates random keypoints when the original `01_Keypoints/` directories
+    are absent (the public 3DMatch download doesn't ship them).
+  * Configurable via `GRAPHITE_MATCH3D_SCENES` and
+    `GRAPHITE_MATCH3D_NUM_KEYPOINTS`.
+* **Replaced** the broken evaluation loop in `test_match.py` with a per-scene
+  recall summary that also writes a standard
+  Choi/Zhou/Koltun-format `graphite.log` for downstream evaluators.
 * **Modernised** PyG imports: `torch_geometric.data.DataLoader` →
   `torch_geometric.loader.DataLoader` (the old location was removed in PyG
   2.0).
@@ -227,7 +345,9 @@ model.eval()
 
 ---
 
-## 8. Legacy notes
+---
+
+## 9. Legacy notes
 
 ### Running on FAT
 

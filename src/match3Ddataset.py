@@ -11,22 +11,70 @@ from graph import *
 
 # import multiprocessing
 # multiprocessing.set_start_method("spawn", True)
-VOXEL_SIZE=0.04
+VOXEL_SIZE = 0.04
+
+# Fixed RNG so the random keypoint set is reproducible across runs.
+KEYPOINT_RNG = np.random.RandomState(42)
+# Number of random keypoints to sample per fragment when no precomputed file
+# is available.  3DMatch's reference benchmark uses 5000 random keypoints.
+DEFAULT_NUM_KEYPOINTS = int(os.environ.get('GRAPHITE_MATCH3D_NUM_KEYPOINTS', '5000'))
+
 
 def read_keypoint_list(file_path):
-    list_k= np.loadtxt(file_path,dtype=int)
+    list_k = np.loadtxt(file_path, dtype=int)
     return list_k
 
+
+def _generate_random_keypoints(num_points, num_keypoints):
+    """Sample ``num_keypoints`` indices uniformly from ``num_points``.
+
+    This mirrors how the original 3DMatch geometric registration benchmark
+    operates when no precomputed keypoint file is available - it simply picks
+    random points from the fragment.
+    """
+    n = max(1, min(num_keypoints, num_points))
+    return KEYPOINT_RNG.choice(num_points, size=n, replace=False).astype(int)
+
+
 class Match3DDataset(Dataset):
-    """torch_geometric.data.Dataset to create pointcloud dataset we need."""
+    """Dataset wrapping the 3DMatch Geometric Registration Benchmark fragments.
 
-    def __init__(self, root, transform=None, pre_transform=None):
+    Expected directory layout (under ``root``):
 
-        self.object_ids = ['home1','home2','hotel1','hotel2','hotel3','kitchen','mit','study']
-        self.scene_len = [60,60,57,55,37,60,38,66]
+        fragments/<scene>/cloud_bin_X.ply               (required)
+        fragments/<scene>/01_Keypoints/cloud_bin_XKeypoints.txt   (optional)
+        eval_files/<scene>/gt.log                       (required for testing)
 
-        self.object_ids =['home1']#,'kitchen','mit','study']
-        self.scene_len = [60]#,60,38,66]
+    If the ``01_Keypoints`` directory is missing for a scene, random
+    keypoints are sampled instead (configurable via the
+    ``GRAPHITE_MATCH3D_NUM_KEYPOINTS`` env var, default 5000).
+
+    ``object_ids`` defaults to all eight scenes from the official 3DMatch
+    benchmark.  Override via the ``GRAPHITE_MATCH3D_SCENES`` env var (comma
+    separated list of scene names).
+    """
+
+    def __init__(self, root, transform=None, pre_transform=None,
+                 object_ids=None, scene_len=None):
+
+        all_object_ids = ['home1', 'home2', 'hotel1', 'hotel2',
+                          'hotel3', 'kitchen', 'mit', 'study']
+        all_scene_len = [60, 60, 57, 55, 37, 60, 38, 66]
+
+        env_scenes = os.environ.get('GRAPHITE_MATCH3D_SCENES')
+        if object_ids is None and env_scenes:
+            object_ids = [s.strip() for s in env_scenes.split(',') if s.strip()]
+
+        if object_ids is None:
+            self.object_ids = list(all_object_ids)
+            self.scene_len = list(all_scene_len)
+        else:
+            self.object_ids = list(object_ids)
+            if scene_len is None:
+                lookup = dict(zip(all_object_ids, all_scene_len))
+                self.scene_len = [lookup.get(name, None) for name in self.object_ids]
+            else:
+                self.scene_len = list(scene_len)
 
         
         self.root = root
@@ -96,17 +144,30 @@ class Match3DDataset(Dataset):
 
             data = []
             raw = {}
-            
-            for j in tqdm(range(0, self.scene_len[i], 1)):
 
-                ply_name='/cloud_bin_%d.ply'%(j)
-                keypoint_file_name='cloud_bin_%dKeypoints.txt'%(j)
-                index_keys=read_keypoint_list(sub_dir_path+'/01_Keypoints/'+keypoint_file_name)
+            # Auto-detect scene length when not supplied (matches the number of
+            # ``cloud_bin_X.ply`` files in the fragments folder).
+            scene_len_i = self.scene_len[i]
+            if scene_len_i is None:
+                ply_files = [f for f in os.listdir(sub_dir_path)
+                             if f.startswith('cloud_bin_') and f.endswith('.ply')]
+                scene_len_i = len(ply_files)
+                self.scene_len[i] = scene_len_i
+
+            for j in tqdm(range(0, scene_len_i, 1)):
+
+                ply_name = '/cloud_bin_%d.ply' % (j)
+                keypoint_file_name = 'cloud_bin_%dKeypoints.txt' % (j)
+                keypoint_path = sub_dir_path + '/01_Keypoints/' + keypoint_file_name
                 ply_path = sub_dir_path + ply_name
 
+                ply = o3d.io.read_point_cloud(ply_path)
 
-
-                ply=o3d.io.read_point_cloud(ply_path)
+                if os.path.exists(keypoint_path):
+                    index_keys = read_keypoint_list(keypoint_path)
+                else:
+                    index_keys = _generate_random_keypoints(
+                        len(ply.points), DEFAULT_NUM_KEYPOINTS)
     
 
                 # max_bound=np.median(ply.get_max_bound()-ply.get_min_bound())

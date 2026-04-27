@@ -1,3 +1,4 @@
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -103,54 +104,102 @@ def test_visualize_desc(settings, net, test_data):
         # o3d.visualization.draw_geometries([pc_raw,keypoints_high])
  
 
-def test(settings, net, test_data):
+def _read_pair_list(gt_log_path):
+    """Parse a 3DMatch ``gt.log`` into a list of ``(src, trg, scene_len)``."""
+    pairs = []
+    with open(gt_log_path) as fp:
+        line = fp.readline()
+        cnt = 1
+        while line:
+            if cnt % 5 == 1:
+                parts = line.strip().split()
+                pairs.append((int(parts[0]), int(parts[1]),
+                              int(parts[2]) if len(parts) > 2 else 0))
+            line = fp.readline()
+            cnt += 1
+    return pairs
+
+
+def test(settings, net, test_data, write_log=True):
+    """Run the 3DMatch geometric registration benchmark.
+
+    Computes Graphite's keypoint-match recall (the metric reported in the
+    paper) for each scene and an aggregate average.  When ``write_log`` is
+    true, also writes a ``graphite.log`` file alongside ``gt.log`` for each
+    scene so the standard Choi/Zhou/Koltun evaluator can be applied.
+    """
 
     net.eval()
 
-
-    descriptors={x:[] for x in test_data.object_ids}
+    print('Encoding fragments per scene with the trained model ...')
+    descriptors = {x: [] for x in test_data.object_ids}
     for data in tqdm(test_data):
-
-
         scene = data['scene']
         desc = get_desc_from_net(settings, net, data)
         descriptors[scene].append(desc)
 
-    for scene_num in range( len(test_data.object_ids)):
+    overall_recall = 0.0
+    overall_pairs = 0
+    per_scene = []
 
-        scene_length=test_data.scene_len[scene_num]
-        scene_name=test_data.object_ids[scene_num]
+    for scene_num in range(len(test_data.object_ids)):
+        scene_name = test_data.object_ids[scene_num]
+        gt_log = os.path.join(MATCH3D_DIR, 'eval_files', scene_name, 'gt.log')
+        if not os.path.exists(gt_log):
+            print('  [{}] gt.log not found at {} - skipping scene'.format(
+                scene_name, gt_log))
+            continue
 
-        list_src_trg=[]
-        filepath = MATCH3D_DIR+'/eval_files/'+scene_name+"/gt.log"
-        with open(filepath) as fp:
-            line = fp.readline()
-            cnt = 1
-            while line:
-                if cnt%5==1:
-                    list_src_trg.append((int(line.strip().split('\t')[0]),int(line.strip().split('\t')[1])))
-                line = fp.readline()
-                cnt += 1
-        
-        # f = open(MATCH3D_DIR+'/eval_files/'+scene_name+"/graphite.log", "w")
+        pairs = _read_pair_list(gt_log)
+        if not pairs:
+            print('  [{}] no pairs in gt.log - skipping'.format(scene_name))
+            continue
 
-        pos=0
-        sum_matches=0
-        for pair in tqdm(list_src_trg):
-            frame1=pair[0]
-            frame2=pair[1]
-            success,number_match=register_scenes(descriptors[scene_name][frame1], descriptors[scene_name][frame2])
-            sum_matches+=number_match
-            if success:
-                pos+=1
-        log("%s : recall %f average number of keypoint matches %d"%(scene_name,100*pos/len(list_src_trg),sum_matches//len(list_src_trg)),str(settings.to_string()))
-        #     f.write('{}\t{}\t{}\n'.format(frame1,frame2,scene_length))
-        #     f.write('{}\t{}\t{}\t{}\n'.format(tra[0][0],tra[0][1],tra[0][2],tra[0][3]))
-        #     f.write('{}\t{}\t{}\t{}\n'.format(tra[1][0],tra[1][1],tra[1][2],tra[1][3]))
-        #     f.write('{}\t{}\t{}\t{}\n'.format(tra[2][0],tra[2][1],tra[2][2],tra[2][3]))
-        #     f.write('{}\t{}\t{}\t{}\n'.format(tra[3][0],tra[3][1],tra[3][2],tra[3][3]))
+        graphite_log_path = os.path.join(
+            MATCH3D_DIR, 'eval_files', scene_name, 'graphite.log')
+        graphite_log = open(graphite_log_path, 'w') if write_log else None
 
-        # f.close()
+        pos = 0
+        sum_matches = 0
+        try:
+            for src, trg, _scene_length in tqdm(pairs, desc=scene_name):
+                if src >= len(descriptors[scene_name]) or trg >= len(descriptors[scene_name]):
+                    continue
+                success, number_match, transformation = register_scenes(
+                    descriptors[scene_name][src],
+                    descriptors[scene_name][trg],
+                    return_transformation=True,
+                )
+                sum_matches += number_match
+                if success:
+                    pos += 1
+                if graphite_log is not None:
+                    scene_length = test_data.scene_len[scene_num] or len(descriptors[scene_name])
+                    graphite_log.write('{}\t{}\t{}\n'.format(src, trg, scene_length))
+                    for r in range(4):
+                        graphite_log.write('\t'.join(
+                            '{: .8e}'.format(transformation[r, c]) for c in range(4)) + '\n')
+        finally:
+            if graphite_log is not None:
+                graphite_log.close()
+
+        recall = 100.0 * pos / len(pairs)
+        avg_matches = sum_matches // max(1, len(pairs))
+        per_scene.append((scene_name, recall, avg_matches, len(pairs)))
+        overall_recall += pos
+        overall_pairs += len(pairs)
+        log('%s : recall %f average number of keypoint matches %d' %
+            (scene_name, recall, avg_matches), str(settings.to_string()))
+
+    if overall_pairs:
+        avg = 100.0 * overall_recall / overall_pairs
+        log('--- 3DMatch summary ---', str(settings.to_string()))
+        for name, rec, m, n in per_scene:
+            log('{:>10s}  recall={:6.2f}%  avg_matches={:5d}  pairs={}'.format(
+                name, rec, m, n), str(settings.to_string()))
+        log('average recall over {} pairs: {:6.2f}%'.format(overall_pairs, avg),
+            str(settings.to_string()))
+    return per_scene
 
 def npmat2euler(mats, seq='zyx'):
     eulers = []
@@ -205,7 +254,7 @@ def get_desc_from_net(settings, model, data):
 
     return final
 
-def register_scenes(final1, final2):
+def register_scenes(final1, final2, return_transformation=False):
     visualize=False
     descriptorMatcher = DescriptorMatcher()
     keysA, keysB,descA,descB, ind = descriptorMatcher.match(final1, final2,return_id=True)
@@ -263,18 +312,19 @@ def register_scenes(final1, final2):
     # p2 = final2['positions']
 
     f1_feat = o3d.registration.Feature()
-    f1_feat.data = descA.T
+    f1_feat.data = np.ascontiguousarray(descA.T.astype(np.float64))
 
     f2_feat = o3d.registration.Feature()
-    f2_feat.data = descB.T
+    f2_feat.data = np.ascontiguousarray(descB.T.astype(np.float64))
 
     distance_threshold=0.05
     inliers=4#int(len(tuples)*0.1)
     res=o3d.registration.registration_ransac_based_on_feature_matching(keypoints_o3d_a, keypoints_o3d_b, f1_feat,f2_feat,
+     mutual_filter=False,
      max_correspondence_distance=distance_threshold,estimation_method=o3d.registration.TransformationEstimationPointToPoint(),
      ransac_n=inliers,checkers =[o3d.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
          o3d.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)],
-            criteria=o3d.registration.RANSACConvergenceCriteria(max_validation=500,max_iteration=4000000))#
+            criteria=o3d.registration.RANSACConvergenceCriteria(max_iteration=4000000))#
     
 
     # #old style
@@ -335,7 +385,11 @@ def register_scenes(final1, final2):
     
     # estimatedRotationICP=res.tra[0:3,0:3]
     # estimatedTranslationICP=np.expand_dims(res.tra[0:3,3],1)
-    return sum(percent)/len(percent)>0.05,len(percent)
+    n = max(1, len(percent))
+    success = sum(percent) / n > 0.05
+    if return_transformation:
+        return success, len(percent), np.asarray(res.transformation)
+    return success, len(percent)
 
 
 def transform_point_cloud(point_cloud, rotation, translation):
