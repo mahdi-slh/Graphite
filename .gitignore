@@ -17,3 +17,5 @@ model/*
 !visualize_graph.ipynb
 *.txt
 src/temp.off
+*.model
+*.log

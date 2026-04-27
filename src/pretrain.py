@@ -12,12 +12,19 @@ from scipy.spatial import distance
 from os import path
 from maths import *
 from params import *
-from torch_geometric.data import DataLoader, Batch
+from torch_geometric.data import Batch
+try:
+    from torch_geometric.loader import DataLoader  # PyG >= 2.0
+except ImportError:  # pragma: no cover
+    from torch_geometric.data import DataLoader
 from torch.utils.data import DataLoader as UtilsDataLoader
 from torch.utils.data import Sampler, BatchSampler
 from torch import nn
 from dataloader_pointcloud_helper import _get_points_from_rgb_and_depth_image
-import visdom
+try:
+    import visdom  # noqa: F401
+except Exception:
+    visdom = None  # noqa: F811
 from log import log
 
 
@@ -72,10 +79,18 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
         plotter.plot('confidence loss ', 'validation', 'confidence loss file '+tag, epoch, c_valid_loss)
         
         if epoch%5==4 or pretrain is not True:
-            test_rt.test(settings, model, dataset_test)
-            test_match.test(settings,model,dataset_test_match)
+            if dataset_test is not None:
+                try:
+                    test_rt.test(settings, model, dataset_test)
+                except Exception as exc:
+                    print('test_rt skipped due to error:', exc)
+            if dataset_test_match is not None:
+                try:
+                    test_match.test(settings, model, dataset_test_match)
+                except Exception as exc:
+                    print('test_match skipped due to error:', exc)
             torch.save(model.state_dict(), get_model_name(pretrain, settings))
-            torch.save(model.state_dict(), get_model_name(pretrain, settings,epoch=str(epoch)))
+            torch.save(model.state_dict(), get_model_name(pretrain, settings, epoch=str(epoch)))
 
     log("pretraining done.",str(settings.to_string()))
 
@@ -131,11 +146,11 @@ def run_epoch(loader_iter, epoch_number, model, plotter, train, settings, optimi
             qp = output['descriptors'][j+1]
             qn = output['descriptors'][j+2]
             
-            sum_neg += np.asscalar(torch.dist(qa, qn).cpu().detach().numpy())
-            sum_neg_window += np.asscalar(torch.dist(qa, qn).cpu().detach().numpy())
+            sum_neg += torch.dist(qa, qn).item()
+            sum_neg_window += torch.dist(qa, qn).item()
 
-            sum_pos += np.asscalar(torch.dist(qa, qp).cpu().detach().numpy())
-            sum_pos_window += np.asscalar(torch.dist(qa, qp).cpu().detach().numpy())
+            sum_pos += torch.dist(qa, qp).item()
+            sum_pos_window += torch.dist(qa, qp).item()
         
         if pretrain:
             c = (torch.argmax(gt_labels, dim=1) == torch.argmax(output['probabilities'], dim=1)).sum().item()

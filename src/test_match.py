@@ -5,7 +5,11 @@ from tqdm import tqdm
 from scipy.spatial.transform import Rotation
 from sklearn.neighbors import NearestNeighbors
 
-from torch_geometric.data import DataLoader, Batch
+from torch_geometric.data import Batch
+try:
+    from torch_geometric.loader import DataLoader  # PyG >= 2.0
+except ImportError:  # pragma: no cover
+    from torch_geometric.data import DataLoader
 from torch.utils.data import DataLoader as UtilsDataLoader
 from torch.utils.data import Sampler, BatchSampler
 from torch import nn
@@ -151,7 +155,8 @@ def test(settings, net, test_data):
 def npmat2euler(mats, seq='zyx'):
     eulers = []
     for i in range(mats.shape[0]):
-        r = Rotation.from_dcm(mats[i])
+        from_dcm = getattr(Rotation, 'from_dcm', Rotation.from_matrix)
+        r = from_dcm(mats[i])
         eulers.append(r.as_euler(seq, degrees=True))
     return np.asarray(eulers, dtype='float32')
 

@@ -127,7 +127,7 @@ class DescriptorMatcher():
         # matches = sorted(matches, key=lambda x: x.distance)
 
         number_of_matches =len(matches)
-        ind = np.zeros([number_of_matches, 2],dtype=np.int)
+        ind = np.zeros([number_of_matches, 2],dtype=int)
         for k in range(0, number_of_matches):
 
             i = matches[k].queryIdx
@@ -162,7 +162,7 @@ class DescriptorMatcher():
         number_of_matches =np.minimum(40000,len(matches))
         setA = np.zeros([number_of_matches, 3])
         setB = np.zeros([number_of_matches, 3])
-        ind = np.zeros([number_of_matches, 2],dtype=np.int)
+        ind = np.zeros([number_of_matches, 2],dtype=int)
         for k in range(0, number_of_matches):
 
             i = matches[k][0].queryIdx
@@ -192,7 +192,7 @@ class DescriptorMatcher():
         matches = sorted(matches, key=lambda x: x.distance)
 
         number_of_matches = len(matches)
-        ind = np.zeros([number_of_matches, 2],dtype=np.int)
+        ind = np.zeros([number_of_matches, 2],dtype=int)
 
 
         for k in range(0, number_of_matches):
@@ -250,22 +250,39 @@ def merge_dict(dicts):
 
 def get_model_name(pretrain, settings,epoch=''): return (PRETRAINED_MODEL_PATH if pretrain else TRAINED_MODEL_PATH) + str(settings.to_string())+epoch + '.model'
 
-from visdom import Visdom
+try:
+    from visdom import Visdom  # noqa: F401
+    _HAS_VISDOM = True
+except Exception:
+    _HAS_VISDOM = False
+
 
 class VisdomLinePlotter(object):
-    """Plots to Visdom"""
+    """Plots to Visdom (no-op when visdom is unavailable / server is down)."""
+
     def __init__(self, env_name='main'):
-        self.viz = Visdom()
         self.env = env_name
         self.plots = {}
+        self.viz = None
+        if _HAS_VISDOM:
+            try:
+                self.viz = Visdom(raise_exceptions=False)
+                if not self.viz.check_connection():
+                    self.viz = None
+            except Exception:
+                self.viz = None
 
     def plot(self, var_name, split_name, title_name, x, y):
-        if var_name not in self.plots:
-            self.plots[var_name] = self.viz.line(X=np.array([x,x]), Y=np.array([y,y]), env=self.env, opts=dict(
-                legend=[split_name],
-                title=title_name,
-                xlabel='Epochs | Iters/report',
-                ylabel=var_name
-            ))
-        else:
-            self.viz.line(X=np.array([x]), Y=np.array([y]), env=self.env, win=self.plots[var_name], name=split_name, update = 'append')
+        if self.viz is None:
+            return
+        try:
+            if var_name not in self.plots:
+                self.plots[var_name] = self.viz.line(
+                    X=np.array([x, x]), Y=np.array([y, y]), env=self.env,
+                    opts=dict(legend=[split_name], title=title_name,
+                              xlabel='Epochs | Iters/report', ylabel=var_name))
+            else:
+                self.viz.line(X=np.array([x]), Y=np.array([y]), env=self.env,
+                              win=self.plots[var_name], name=split_name, update='append')
+        except Exception:
+            pass

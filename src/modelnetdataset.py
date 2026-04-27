@@ -8,7 +8,7 @@ from tqdm import tqdm
 import random
 from params import *
 import gc
-from bunny import create_random_patches
+from pointcloud_utils import create_random_patches
 import numpy as np
 from scipy.spatial.transform import Rotation
 from maths import *
@@ -92,18 +92,19 @@ class ModelNetDataset(Dataset):
         self.mode=mode+'/'
         self.train = train
 
-        if self.mode=='patch/':
-            self.object_ids = [0, 1, 2,3,4,5,6,7,8,9,10] if self.train else [20,21,22,23,24,25,26,27,28,29,30]
-        elif self.mode=='noise/':
-            self.object_ids = [0, 1, 2,3,4,5,6,7,8,9,10,11,12]#,13,14,15,16,17,18,19,20]# if self.train else  [5,6,7,8,9,10]
-            # self.object_ids =[12] #[4,6]
-        else:
-            self.object_ids = [0, 1, 2,3,4,5,6,7,8,9,10,11,12]
-        # self.object_ids = [0, 1, 2] if self.train else [  20]
-        
         with open(root + 'object_names.txt') as f:
             self.object_names = f.readlines()
             self.object_names = [x.replace('\n', '') for x in self.object_names if len(x) > 3]
+
+        n_classes = len(self.object_names)
+        if self.mode == 'patch/':
+            train_n = min(11, n_classes)
+            self.object_ids = list(range(train_n)) if self.train else list(range(min(n_classes - 1, 20),
+                                                                                  min(n_classes, 31)))
+            if not self.object_ids:
+                self.object_ids = list(range(n_classes))
+        else:  # 'noise/' or 'patchnoise/'
+            self.object_ids = list(range(min(13, n_classes)))
 
         self.root = root
         self.processed_paths = self.processed_file_names()
@@ -168,17 +169,19 @@ class ModelNetDataset(Dataset):
             
             count = 0
 
-            for off in tqdm(os.listdir(base_path)):
-                
+            max_train = int(os.environ.get('GRAPHITE_MAX_TRAIN_PER_CLASS', '0')) or None
+            max_test = int(os.environ.get('GRAPHITE_MAX_TEST_PER_CLASS', '0')) or None
+            entries = sorted(os.listdir(base_path))
+            for off in tqdm(entries):
+
                 count += 1
                 if(not off.endswith('off')):
                     continue
 
-                # if(self.train and count > 200):
-                #     break
-
-                # if(not self.train and count > 10):
-                #     break
+                if(self.train and max_train is not None and count > max_train):
+                    break
+                if(not self.train and max_test is not None and count > max_test):
+                    break
 
                 point_cloud1 = load_point_cloud_from_off(base_path + off)
                 if(point_cloud1 is None):

@@ -15,8 +15,15 @@ from params import *
 from torch_scatter import scatter_mean
 from dataloader_pointcloud_helper import _get_points_from_rgb_and_depth_image
 from sklearn.neighbors import RadiusNeighborsTransformer, NearestNeighbors
-import visdom
-from torch_geometric.data import DataLoader, Batch
+try:
+    import visdom  # noqa: F401
+except Exception:
+    visdom = None  # noqa: F811
+from torch_geometric.data import Batch
+try:
+    from torch_geometric.loader import DataLoader  # PyG >= 2.0
+except ImportError:  # pragma: no cover
+    from torch_geometric.data import DataLoader
 from torch.utils.data import Sampler, BatchSampler
 from torch.utils.data.sampler import SubsetRandomSampler
 
