@@ -9,6 +9,7 @@ from tqdm import tqdm
 import random
 import cv2
 from scipy.spatial import distance
+import os
 from os import path
 from maths import *
 from params import *
@@ -35,9 +36,31 @@ from modelnetdataset import *
 report_k = 1
 
 criterion_cos = torch.nn.CosineSimilarity()
-criterion1 = torch.nn.L1Loss(reduction='sum')
-criterion2 = torch.nn.MSELoss(reduction='sum')
+criterion1 = torch.nn.L1Loss(reduction='mean')
+criterion2 = torch.nn.MSELoss(reduction='mean')
 triplet_loss = None
+
+def _build_optimizer(model, settings):
+    weight_decay = float(getattr(settings, 'weight_decay', 0.0) or 0.0)
+    if weight_decay > 0.0:
+        return torch.optim.AdamW(model.parameters(),
+                                 lr=settings.learning_rate,
+                                 weight_decay=weight_decay)
+    return torch.optim.Adam(model.parameters(), lr=settings.learning_rate)
+
+
+def _build_scheduler(optimizer, settings):
+    schedule = getattr(settings, 'lr_schedule', 'none')
+    if schedule == 'cosine':
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=settings.epoch_size, eta_min=settings.learning_rate * 0.01)
+    if schedule == 'step':
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=max(1, settings.epoch_size // 3),
+            gamma=0.5)
+    return None
+
 
 def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretrain=True, model_path=None):
 
@@ -46,8 +69,14 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
 
     model = init_model(model_path, settings)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=settings.learning_rate)
-    triplet_loss = nn.TripletMarginLoss(margin=settings.m, p=2, reduction='sum')
+    optimizer = _build_optimizer(model, settings)
+    scheduler = _build_scheduler(optimizer, settings)
+    # ``swap=True`` makes hinges harder by using min(||a-n||, ||p-n||) as the
+    # negative distance — useful when positive distances stay flat because
+    # the network is satisfying the margin entirely by pushing negatives
+    # further away.
+    triplet_loss = nn.TripletMarginLoss(margin=settings.m, p=2,
+                                        swap=True, reduction='mean')
 
     tag=str(settings.to_string())
     plotter = VisdomLinePlotter(env_name='PRETRAIN ' + tag + '-' + ('1' if pretrain else '2'))
@@ -55,8 +84,21 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
     wandb_logger.init(config=vars(settings), name=tag)
 
     train_mask, val_mask = create_test_validation_masks(dataset_train, VALIDATION_SPLIT)
-    val_loader = DataLoader(dataset_train, batch_sampler=BatchSampler(TripletSampler(len(dataset_train) - 1, val_mask), batch_size=settings.mb_size, drop_last=True))
-    train_loader = DataLoader(dataset_train, batch_sampler=BatchSampler(TripletSampler(len(dataset_train) - 1, train_mask), batch_size=settings.mb_size, drop_last=True))
+    pair_class_ids = getattr(dataset_train, 'pair_class_ids', None)
+    val_loader = DataLoader(
+        dataset_train,
+        batch_sampler=BatchSampler(
+            TripletSampler(len(dataset_train) - 1, val_mask, pair_class_ids),
+            batch_size=settings.mb_size, drop_last=True))
+    train_loader = DataLoader(
+        dataset_train,
+        batch_sampler=BatchSampler(
+            TripletSampler(len(dataset_train) - 1, train_mask, pair_class_ids),
+            batch_size=settings.mb_size, drop_last=True))
+
+    best_metric = float('inf')
+    best_metric_key = os.environ.get('GRAPHITE_BEST_METRIC',
+                                     'eval_modelnet/icp/rot_RMSE')
 
     for epoch in range(settings.epoch_size):
         log('-------Starting epoch %d--------'%(epoch+1),str(settings.to_string()))
@@ -81,8 +123,10 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
         plotter.plot('avg similarity negative ', 'validation', 'avg similarity negative file '+tag, epoch, avg_neg_v)
         plotter.plot('confidence loss ', 'validation', 'confidence loss file '+tag, epoch, c_valid_loss)
 
+        current_lr = optimizer.param_groups[0]['lr']
         wandb_logger.log({
             'epoch': epoch,
+            'lr': current_lr,
             'train/label_loss': l_train_loss,
             'train/descriptor_loss': d_train_loss,
             'train/accuracy': acc_train,
@@ -95,17 +139,20 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
             'val/avg_pos_dist': avg_pos_v,
             'val/avg_neg_dist': avg_neg_v,
             'val/confidence_loss': c_valid_loss,
-        }, step=epoch)
+        })
 
-        if epoch%5==4 or pretrain is not True:
+        if scheduler is not None:
+            scheduler.step()
+
+        if epoch % 5 == 4 or pretrain is not True:
+            test_metrics = None
             if dataset_test is not None:
                 try:
                     test_metrics = test_rt.test(settings, model, dataset_test)
                     if test_metrics:
                         wandb_logger.log({'epoch': epoch,
                                           **{'eval_modelnet/' + k: v
-                                             for k, v in test_metrics.items()}},
-                                         step=epoch)
+                                             for k, v in test_metrics.items()}})
                 except Exception as exc:
                     print('test_rt skipped due to error:', exc)
             if dataset_test_match is not None:
@@ -115,6 +162,23 @@ def pretrain(settings, dataset_train,dataset_test,dataset_test_match=None, pretr
                     print('test_match skipped due to error:', exc)
             torch.save(model.state_dict(), get_model_name(pretrain, settings))
             torch.save(model.state_dict(), get_model_name(pretrain, settings, epoch=str(epoch)))
+
+            # Track best checkpoint by val metric (default: ICP rotation RMSE).
+            if test_metrics is not None:
+                metric_short = best_metric_key.split('/', 1)[-1]
+                candidate = test_metrics.get(metric_short)
+                if candidate is not None and candidate < best_metric:
+                    best_metric = candidate
+                    best_path = get_model_name(pretrain, settings,
+                                               epoch='best')
+                    torch.save(model.state_dict(), best_path)
+                    log('new best checkpoint: {} = {:.4f}'.format(
+                        best_metric_key, candidate),
+                        str(settings.to_string()))
+                    wandb_logger.log({
+                        'epoch': epoch,
+                        'best/' + metric_short: best_metric,
+                    })
 
     log("pretraining done.",str(settings.to_string()))
     wandb_logger.finish()
@@ -214,18 +278,38 @@ def run_epoch(loader_iter, epoch_number, model, plotter, train, settings, optimi
 
         if(train):
             loss.backward()
+            grad_clip = float(getattr(settings, 'grad_clip', 0.0) or 0.0)
+            if grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
-        if((i % settings.report_size == 0 and train and i > 0)):
-            
+        if i % settings.report_size == 0 and train and i > 0:
             tag = str(settings.file_tag)
+            window_n = settings.report_size
+            triplets_per_batch = max(1, settings.mb_size // 3)
 
-            plotter.plot('iteration descriptor loss', 'train', 'descriptor loss'+tag, report_k, window_desc.item()/(settings.mb_size*settings.report_size//3))
-            plotter.plot('iteration confidence', 'train', 'confidence'+tag, report_k, window_conf.item()/(settings.mb_size*settings.report_size))
-            # plotter.plot('iteration positive term', 'train', 'positive term'+tag, report_k, sum_pos_window/(settings.mb_size*settings.report_size//3))
-            # plotter.plot('iteration negative term', 'train', 'negative term'+tag, report_k, sum_neg_window/(settings.mb_size*settings.report_size//3))
-            plotter.plot('iteration label loss', 'train', 'label loss'+tag, report_k, window_label.item()/(settings.mb_size*settings.report_size))
-            plotter.plot('iteration accuracy', 'train', 'accuracy  file '+tag, report_k, (corrects*100)/(settings.mb_size*settings.report_size))
+            plotter.plot('iteration descriptor loss', 'train', 'descriptor loss'+tag,
+                         report_k, window_desc.item() / window_n)
+            plotter.plot('iteration confidence', 'train', 'confidence'+tag,
+                         report_k, window_conf.item() / window_n)
+            plotter.plot('iteration label loss', 'train', 'label loss'+tag,
+                         report_k, window_label.item() / window_n)
+            plotter.plot('iteration accuracy', 'train', 'accuracy  file '+tag,
+                         report_k,
+                         (corrects * 100) / (triplets_per_batch * window_n))
+
+            wandb_logger.log({
+                'iter/descriptor_loss': window_desc.item() / window_n,
+                'iter/label_loss': window_label.item() / window_n,
+                'iter/confidence_loss': window_conf.item() / window_n,
+                'iter/accuracy': (corrects * 100)
+                                   / (triplets_per_batch * window_n),
+                'iter/avg_pos_dist': sum_pos_window
+                                      / (triplets_per_batch * window_n),
+                'iter/avg_neg_dist': sum_neg_window
+                                      / (triplets_per_batch * window_n),
+            })
+
             report_k += 1
 
             torch.save(model.state_dict(), get_model_name(pretrain, settings))
@@ -238,7 +322,12 @@ def run_epoch(loader_iter, epoch_number, model, plotter, train, settings, optimi
             sum_neg_window = 0
             sum_pos_window = 0
 
-
-    length_loss = settings.mb_size*samples_length
-    length_desc = settings.mb_size*samples_length//3
-    return l_total_loss / length_loss, d_total_loss / length_desc, total_corrects*100/length_loss, sum_pos/length_desc, sum_neg/length_desc, c_total_loss/length_loss
+    triplets_per_batch = max(1, settings.mb_size // 3)
+    return (
+        l_total_loss / samples_length,
+        d_total_loss / samples_length,
+        total_corrects * 100 / (triplets_per_batch * samples_length),
+        sum_pos / (triplets_per_batch * samples_length),
+        sum_neg / (triplets_per_batch * samples_length),
+        c_total_loss / samples_length,
+    )

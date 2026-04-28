@@ -124,11 +124,23 @@ GRAPHITE_MAX_TRAIN_PER_CLASS=3 GRAPHITE_MAX_TEST_PER_CLASS=2 \
 |------|---------|-------|
 | `--epoch-size` | 50 | Number of epochs |
 | `--mb-size` | 12 | Must be a multiple of 3 (triplet sampling) |
-| `--learning-rate` | 1e-4 | Adam lr |
+| `--learning-rate` | 1e-4 | Optimizer base LR |
+| `--alpha` | 1.0 | Weight on the descriptor (triplet) loss; losses now use mean reduction |
+| `--m` | 0.7 | Triplet margin (unit-norm descriptors, distances in `[0, 2]`) |
+| `--weight-decay` | 1e-4 | AdamW weight decay; `0` falls back to plain Adam |
+| `--grad-clip` | 1.0 | Max gradient norm; `<=0` disables clipping |
+| `--lr-schedule` | `cosine` | `cosine` / `step` / `none` |
+| `--arch` | `netae` | Architecture: `netae` (default) or `net` |
 | `--data-mode` | `noise` | `noise` / `patch` / `patchnoise` |
 | `--split` | auto | `dcp` (first 20 / last 20), `all`, `first11`, `custom` |
 | `--resume PATH` | – | Continue from a saved `.model` |
 | `--file-tag` | `modelnet_run` | Used in checkpoint and log filenames |
+
+The triplet sampler is **class-aware**: negatives are drawn from a
+different ModelNet category than the anchor (no more silent label noise
+from `random.randint`).  Best-on-val checkpoints are written alongside
+each periodic save as `<tag>_best.model`; the metric is configurable
+with `GRAPHITE_BEST_METRIC` (default `eval_modelnet/icp/rot_RMSE`).
 
 ### Optional: Weights & Biases tracking
 

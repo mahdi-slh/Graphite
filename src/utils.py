@@ -88,11 +88,16 @@ def get_correct_indices_from_probabilty(probabilities):
 
 
 def create_test_validation_masks(dataset, split_ratio):
-    """Split Dataset to train/val sets in random way with split_ratio."""
-    even_index = [2 * x for x in list(range((len(dataset) - 2)//2))]
-    train_mask = random.sample(even_index, k=(int)(len(even_index) * split_ratio))
-    val_mask = [i for i in even_index if i not in train_mask]
+    """Split a triplet-pair dataset into (train, validation) index masks.
 
+    The dataset is laid out so that pair k occupies indices ``[2k, 2k+1]``;
+    only the even (anchor) indices are sampled.  Uses set-based exclusion
+    for O(n) construction (the previous list-comprehension was O(n^2)).
+    """
+    even_index = [2 * x for x in range((len(dataset) - 2) // 2)]
+    train_mask = random.sample(even_index, k=int(len(even_index) * split_ratio))
+    train_set = set(train_mask)
+    val_mask = [i for i in even_index if i not in train_set]
     return train_mask, val_mask
 
 def create_test_validation_masks_for_fat(dataset, split_ratio):
@@ -208,26 +213,61 @@ class DescriptorMatcher():
 
 
 class TripletSampler(Sampler):
+    """Yield (anchor, positive, negative) index triplets.
 
-    def __init__(self, nb_samples, even_indexes):
+    ``even_indexes`` lists the anchor positions in a dataset laid out so
+    that consecutive entries ``[2k, 2k+1]`` form a positive pair.  The
+    negative is drawn uniformly from all valid anchors (default), or, if
+    ``pair_class_ids`` is provided, restricted to *anchors of a different
+    class*.  Class-aware sampling avoids the silent label noise where the
+    "negative" was actually the same category as the anchor — a real bug
+    on small datasets like ModelNet10/40.
+    """
 
+    def __init__(self, nb_samples, even_indexes, pair_class_ids=None,
+                 max_neg_resamples=8):
         self.num_samples = nb_samples
-        self.even_indexes = even_indexes
+        self.even_indexes = list(even_indexes)
+        self.max_neg_resamples = max_neg_resamples
+
+        if pair_class_ids is None:
+            self.pair_class_ids = None
+        else:
+            self.pair_class_ids = list(pair_class_ids)
 
         self.indexes = self._get_indexes()
 
-    def _get_indexes(self):
+    def _class_of(self, even_idx):
+        if self.pair_class_ids is None:
+            return None
+        pair_idx = even_idx // 2
+        if 0 <= pair_idx < len(self.pair_class_ids):
+            return self.pair_class_ids[pair_idx]
+        return None
 
-        evens = self.even_indexes
+    def _sample_negative(self, anchor_class):
+        """Sample a "third" index, optionally rejecting same-class anchors."""
+        for _ in range(self.max_neg_resamples):
+            third = random.randint(0, self.num_samples - 1)
+            if anchor_class is None:
+                return third
+            third_class = self._class_of(third - (third % 2))  # nearest even
+            if third_class is None or third_class != anchor_class:
+                return third
+        # Fall back to a uniform draw if we couldn't find a different class
+        # (e.g. every other anchor is the same class — shouldn't happen on
+        # multi-class data, but stay safe).
+        return random.randint(0, self.num_samples - 1)
+
+    def _get_indexes(self):
+        evens = list(self.even_indexes)
         random.shuffle(evens)
         indexes = []
-
         for even in evens:
             first = even
             second = first + 1
-            third = random.randint(0, self.num_samples - 1)
+            third = self._sample_negative(self._class_of(even))
             indexes.extend([first, second, third])
-
         return indexes
 
     def __iter__(self):

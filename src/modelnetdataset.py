@@ -176,8 +176,13 @@ class ModelNetDataset(Dataset):
 
         self.data = []
         self.raw = {}
+        # ``pair_class_ids[k]`` is the (object-name) class id of pair k in
+        # the train layout (i.e. pair k occupies ``self.data[2*k]`` and
+        # ``self.data[2*k+1]``).  Empty when ``train=False``.
+        self.pair_class_ids = []
 
         for i in range(len(self.processed_paths)):
+            class_id = self.object_ids[i]
             path = self.processed_paths[i]
             temp_data = torch.load(path)
             if(self.train == False):
@@ -191,6 +196,7 @@ class ModelNetDataset(Dataset):
                     for k in range(len(temp_data[j]['a'])):
                         pair_data.append(temp_data[j]['a'][k])
                         pair_data.append(temp_data[j]['b'][k])
+                        self.pair_class_ids.append(class_id)
 
                 self.data.extend(pair_data)
 

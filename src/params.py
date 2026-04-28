@@ -82,11 +82,15 @@ class training_configs:
                  mb_size=12,
                  epoch_size=10,
                  report_size=20,
-                 alpha=0.1,
-                 m=0.5,
+                 alpha=1.0,
+                 m=0.7,
                  learning_rate=1e-4,
                  data_mode='noise',
                  multi_gpu=0,
+                 arch='netae',
+                 weight_decay=1e-4,
+                 grad_clip=1.0,
+                 lr_schedule='cosine',
                  cuda=None):
         self.file_tag = file_tag
         self.mb_size = mb_size  # must be a multiple of 3 (triplet sampling)
@@ -97,6 +101,10 @@ class training_configs:
         self.learning_rate = learning_rate
         self.data_mode = data_mode  # 'patch' / 'noise' / 'patchnoise'
         self.multi_gpu = multi_gpu
+        self.arch = arch  # 'netae' (default) or 'net'
+        self.weight_decay = weight_decay
+        self.grad_clip = grad_clip
+        self.lr_schedule = lr_schedule  # 'cosine', 'step', or 'none'
         self.cuda = torch.cuda.is_available() if cuda is None else bool(cuda)
 
     def input_params(self, argv=None):
@@ -112,6 +120,14 @@ class training_configs:
         parser.add_argument('--data-mode', dest='data_mode', default=self.data_mode,
                             choices=['patch', 'noise', 'patchnoise'])
         parser.add_argument('--multi-gpu', dest='multi_gpu', type=int, default=self.multi_gpu)
+        parser.add_argument('--arch', default=self.arch, choices=['netae', 'net'])
+        parser.add_argument('--weight-decay', dest='weight_decay', type=float,
+                            default=self.weight_decay)
+        parser.add_argument('--grad-clip', dest='grad_clip', type=float,
+                            default=self.grad_clip,
+                            help='Max gradient norm; <=0 disables clipping.')
+        parser.add_argument('--lr-schedule', dest='lr_schedule', default=self.lr_schedule,
+                            choices=['cosine', 'step', 'none'])
         parser.add_argument('--cuda', type=int, default=int(self.cuda))
         args, _ = parser.parse_known_args(argv)
         for k, v in vars(args).items():

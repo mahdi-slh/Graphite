@@ -167,15 +167,31 @@ def get_metalayer(edge_attr_sz_in, edge_attr_sz_out, node_attr_sz_in, node_attr_
             edge_attr_sz=edge_attr_sz_out), None)
 
 def init_model(path, settings):
-    model = NetAE()
-    if settings.multi_gpu == 1:
-        model = nn.DataParallel(Net())
-    if path != None:
+    """Build the Graphite network and optionally load a checkpoint.
+
+    Architecture is controlled by ``settings.arch`` (default: ``'netae'``).
+    ``multi_gpu=1`` only wraps the network in ``nn.DataParallel``; it no
+    longer changes the underlying architecture (which the original code
+    silently did, breaking checkpoint compatibility between single- and
+    multi-GPU runs).
+    """
+    arch = getattr(settings, 'arch', 'netae').lower()
+    if arch in ('netae', 'ae'):
+        model = NetAE()
+    elif arch in ('net', 'metalayer'):
+        model = Net()
+    else:
+        raise ValueError("Unknown arch: {!r} (expected 'netae' or 'net')".format(arch))
+
+    if getattr(settings, 'multi_gpu', 0) == 1:
+        model = nn.DataParallel(model)
+
+    if path is not None:
         model.load_state_dict(torch.load(path))
-    
-    if(settings.cuda):
+
+    if settings.cuda:
         model.to(torch.cuda.current_device())
-    
+
     return model
 
 

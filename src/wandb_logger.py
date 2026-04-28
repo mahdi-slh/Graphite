@@ -56,6 +56,22 @@ def init(config: Optional[Mapping[str, Any]] = None,
         print('[wandb] init failed, continuing without it:', exc)
         _disabled = True
         _run = None
+        return
+
+    # Tell wandb that epoch-keyed metrics should be charted against
+    # ``epoch`` rather than the implicit global step.  Iteration metrics
+    # keep the default global-step axis.  Glob patterns require a
+    # recent-enough wandb but the call is wrapped in try/except below.
+    try:
+        _wandb.define_metric('epoch')
+        _wandb.define_metric('train/*', step_metric='epoch')
+        _wandb.define_metric('val/*', step_metric='epoch')
+        _wandb.define_metric('eval_modelnet/*', step_metric='epoch')
+        _wandb.define_metric('best/*', step_metric='epoch')
+        _wandb.define_metric('lr', step_metric='epoch')
+    except Exception:
+        # Older wandb versions or non-default backends — don't crash.
+        pass
 
 
 def log(metrics: Mapping[str, Any], step: Optional[int] = None) -> None:

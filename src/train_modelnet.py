@@ -44,10 +44,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--epoch-size', type=int, default=50,
                    help='Number of epochs.')
     p.add_argument('--report-size', type=int, default=100)
-    p.add_argument('--alpha', type=float, default=0.1,
-                   help='Weight of the label loss term.')
-    p.add_argument('--m', type=float, default=0.5,
-                   help='Triplet-margin loss margin.')
+    p.add_argument('--alpha', type=float, default=1.0,
+                   help='Weight of the descriptor (triplet) loss term '
+                        '(losses now use mean reduction).')
+    p.add_argument('--m', type=float, default=0.7,
+                   help='Triplet-margin loss margin (descriptors are unit-norm, '
+                        'so distances live in [0, 2]).')
     p.add_argument('--learning-rate', dest='learning_rate', type=float,
                    default=1e-4)
     p.add_argument('--data-mode', default='noise',
@@ -59,6 +61,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--data-root', default=MODELNET_DIR,
                    help='ModelNet directory (default: $MODELNET_DIR).')
     p.add_argument('--multi-gpu', dest='multi_gpu', type=int, default=0)
+    p.add_argument('--arch', default='netae', choices=['netae', 'net'],
+                   help='Model architecture (default: netae).')
+    p.add_argument('--weight-decay', dest='weight_decay', type=float,
+                   default=1e-4,
+                   help='AdamW weight decay; 0 falls back to plain Adam.')
+    p.add_argument('--grad-clip', dest='grad_clip', type=float, default=1.0,
+                   help='Max gradient norm; <=0 disables clipping.')
+    p.add_argument('--lr-schedule', dest='lr_schedule', default='cosine',
+                   choices=['cosine', 'step', 'none'])
     p.add_argument('--resume', default=None,
                    help='Optional path to a checkpoint to resume from.')
     return p.parse_args()
@@ -75,7 +86,11 @@ def main() -> None:
                                 m=args.m,
                                 learning_rate=args.learning_rate,
                                 data_mode=args.data_mode,
-                                multi_gpu=args.multi_gpu)
+                                multi_gpu=args.multi_gpu,
+                                arch=args.arch,
+                                weight_decay=args.weight_decay,
+                                grad_clip=args.grad_clip,
+                                lr_schedule=args.lr_schedule)
 
     print('=== Settings ===')
     for k, v in vars(settings).items():
