@@ -1,3 +1,4 @@
+import os
 import random
 import numpy as np
 import torch
@@ -5,6 +6,16 @@ import open3d as o3d
 import math
 from pyquaternion import Quaternion
 from scipy.spatial import distance
+
+
+# Inlier threshold (in normalized object units) used by the SVD-RANSAC
+# rigid-pose solver below.  Point clouds are fit into a unit sphere before
+# random transform sampling, with translations in [-0.5, 0.5], so 0.05 is
+# the right order of magnitude.  Override via env var if needed.
+RANSAC_INLIER_THRESH = float(os.environ.get('GRAPHITE_RANSAC_INLIER_THRESH', '0.05'))
+RANSAC_NUM_ITER = int(os.environ.get('GRAPHITE_RANSAC_NUM_ITER', '1000'))
+RANSAC_MIN_SAMPLE = int(os.environ.get('GRAPHITE_RANSAC_MIN_SAMPLE', '4'))
+RANSAC_ROT_GATE = float(os.environ.get('GRAPHITE_RANSAC_ROT_GATE_RAD', '1.4'))
 
 def seperate_rotation_and_translation(tr):
 
@@ -31,56 +42,94 @@ def create_homogenous_matrix(t, r):
 
     return tr
 
-def get_pose_from_two_matching_sets(a, b):
-    
+def get_pose_from_two_matching_sets(a, b,
+                                    inlier_thresh=None,
+                                    num_iter=None,
+                                    min_sample=None,
+                                    rot_gate=None):
+    """Robust SVD-based rigid-pose estimation between two ordered keypoint
+    sets ``a`` and ``b`` (i.e. ``a[i]`` is matched to ``b[i]``).
+
+    Implements proper minimal-sample RANSAC:
+
+    1. Repeat ``num_iter`` times: pick ``min_sample`` random correspondences,
+       solve SVD on that subset, count inliers within ``inlier_thresh`` after
+       transforming ``a`` by the candidate pose.
+    2. Keep the hypothesis with the largest inlier count (ties broken by
+       lowest mean inlier residual), discarding hypotheses whose rotation
+       angle exceeds ``rot_gate`` (radians).
+    3. Re-fit SVD on all inliers of the best hypothesis to tighten the pose.
+
+    The previous implementation sampled 30% of correspondences (too many for
+    real RANSAC) and used a 30-unit inlier threshold (meaningless on data
+    normalised to ``[-1, 1]``), so the routine effectively returned the SVD
+    of a random subset.  This version follows the textbook recipe.
+    """
+
     n = a.shape[0]
-    if(a.shape != b.shape):
+    if a.shape != b.shape:
         print("not a pairing set.")
-        return
+        return None, None, None
 
-    number_of_points = n
-    # print(n)
-    number_of_samples =int(number_of_points*0.3)
-
-
-    if(n < 6):
+    if n < 6:
         print("not enough points.")
         return None, None, None
 
-    
-    number_of_iterations = 1000
+    inlier_thresh = RANSAC_INLIER_THRESH if inlier_thresh is None else inlier_thresh
+    num_iter = RANSAC_NUM_ITER if num_iter is None else num_iter
+    min_sample = max(3, RANSAC_MIN_SAMPLE if min_sample is None else min_sample)
+    rot_gate = RANSAC_ROT_GATE if rot_gate is None else rot_gate
 
-    min_dif = 1000
-    best_tr_t = None
-    best_tr_r = None
+    best_inliers = None
+    best_score = (-1, np.inf)
+    best_t, best_r = None, None
 
-    for i in range(number_of_iterations):
-
-        indexes = random.sample(range(0, number_of_points), number_of_samples)
-
+    for _ in range(num_iter):
+        indexes = random.sample(range(n), min_sample)
         a_s = a[indexes, :]
         b_s = b[indexes, :]
 
-        cent_a=np.mean(a[range(0,n), :],0)
-        cent_b=np.mean(b[range(0,n), :],0)
-        t, r = solve_svd(a_s, b_s,cent_a,cent_b)
+        t, r = solve_svd(a_s, b_s)
+        if t is None or r is None:
+            continue
+        try:
+            angle = abs(Quaternion(matrix=r).angle)
+        except Exception:
+            continue
+        if angle > rot_gate:
+            continue
 
         a_to_b = rotate_np_points_with_t_r(a, t, r)
-        dist_temp = np.linalg.norm(a_to_b - b, axis=1)
-        ind = np.where(dist_temp < 30)[0]
-        if(len(ind) < 6) or abs(Quaternion(matrix=r).angle)>1.7:
+        residuals = np.linalg.norm(a_to_b - b, axis=1)
+        inliers = np.where(residuals < inlier_thresh)[0]
+        if len(inliers) < min_sample:
             continue
-        dif = np.mean(np.linalg.norm(a_to_b - b, axis=1)[ind])
-        
-        if(dif < min_dif):
-            best_tr_t = t
-            best_tr_r = r
-            # print(Quaternion(matrix=r).angle)
-            min_dif = dif
+        score = (len(inliers), float(residuals[inliers].mean()))
 
-    # print(min_dif)
+        if (score[0] > best_score[0]) or \
+           (score[0] == best_score[0] and score[1] < best_score[1]):
+            best_score = score
+            best_inliers = inliers
+            best_t, best_r = t, r
 
-    return best_tr_r, best_tr_t, min_dif
+    if best_inliers is None or len(best_inliers) < min_sample:
+        return None, None, None
+
+    refit_t, refit_r = solve_svd(a[best_inliers], b[best_inliers])
+    if refit_t is not None and refit_r is not None:
+        try:
+            if abs(Quaternion(matrix=refit_r).angle) <= rot_gate:
+                a_to_b = rotate_np_points_with_t_r(a, refit_t, refit_r)
+                residuals = np.linalg.norm(a_to_b - b, axis=1)
+                refit_inliers = np.where(residuals < inlier_thresh)[0]
+                if len(refit_inliers) >= len(best_inliers):
+                    best_t, best_r = refit_t, refit_r
+                    best_score = (len(refit_inliers),
+                                  float(residuals[refit_inliers].mean()))
+        except Exception:
+            pass
+
+    return best_r, best_t, best_score[1]
 
 def solve_svd(a, b,c_a=None,c_b=None):
 

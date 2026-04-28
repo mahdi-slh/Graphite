@@ -320,7 +320,7 @@ def register_scenes(final1, final2, return_transformation=False):
     distance_threshold=0.05
     inliers=4#int(len(tuples)*0.1)
     res=o3d.registration.registration_ransac_based_on_feature_matching(keypoints_o3d_a, keypoints_o3d_b, f1_feat,f2_feat,
-     mutual_filter=False,
+     mutual_filter=True,
      max_correspondence_distance=distance_threshold,estimation_method=o3d.registration.TransformationEstimationPointToPoint(),
      ransac_n=inliers,checkers =[o3d.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
          o3d.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)],

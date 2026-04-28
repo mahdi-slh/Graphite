@@ -1,6 +1,9 @@
+import os
+import random
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import torch
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation
 
@@ -23,6 +26,38 @@ from maths import *
 from utils import *
 from log import log
 from visualize_graph import *
+
+
+# Translation sanity gate (in normalised units; ground-truth translations
+# are sampled from [-0.5, 0.5]).  Predictions outside this range are
+# considered hallucinations and dropped from the metrics.
+_TRANS_SANITY_MAX = float(os.environ.get('GRAPHITE_TRANS_SANITY_MAX', '1.0'))
+
+# Optional minimum confidence for keypoints used in matching/pose estimation.
+# 0.0 keeps every keypoint (paper-equivalent default).  Set e.g. 0.2 to use
+# only "salient" keypoints (Sec. S3 of the paper).
+_CONFIDENCE_THRESH = float(os.environ.get('GRAPHITE_CONFIDENCE_THRESH', '0.0'))
+
+# ICP estimation method.  Defaults to point-to-plane (the paper's choice).
+# Set ``GRAPHITE_ICP_METHOD=point`` to use point-to-point ICP, which is
+# more stable when the RANSAC init is poor.
+_ICP_METHOD = os.environ.get('GRAPHITE_ICP_METHOD', 'plane').lower()
+
+# Eval RNG seed; set to a non-empty value for deterministic numbers.  When
+# unset, eval keeps RANSAC's randomness (matches earlier behaviour).
+_EVAL_SEED = os.environ.get('GRAPHITE_EVAL_SEED', '0')
+
+
+def _seed_eval():
+    if _EVAL_SEED == '':
+        return
+    seed = int(_EVAL_SEED)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 def test(settings, net, test_loader):
 
@@ -84,6 +119,7 @@ def test(settings, net, test_loader):
 def test_one_epoch(settings, net, test_data):
 
     net.eval()
+    _seed_eval()
 
     mse_icp = 0
     mae_icp = 0
@@ -111,6 +147,7 @@ def test_one_epoch(settings, net, test_data):
 
         rotation_icp_pred, translation_icp_pred, rotation_grf_pred, translation_grf_pred = get_r_t_from_net(settings, net, data)
         if(translation_grf_pred is None):
+            failing_cases += 1
             continue
 
         rotation_grf_pred = torch.tensor(rotation_grf_pred).unsqueeze(0)
@@ -118,9 +155,8 @@ def test_one_epoch(settings, net, test_data):
         rotation_icp_pred = torch.tensor(rotation_icp_pred).unsqueeze(0)
         translation_icp_pred = torch.tensor(translation_icp_pred).squeeze(1).unsqueeze(0)
 
-        if(torch.max(translation_grf_pred) > 10):
-            # print("wrong.")
-            failing_cases+=1
+        if torch.max(torch.abs(translation_grf_pred)) > _TRANS_SANITY_MAX:
+            failing_cases += 1
             continue
 
         num_examples += 1
@@ -191,7 +227,7 @@ def get_r_t_from_net(settings, model, data):
     visualize=False
     if(len(data['a']) > 150 or len(data['b']) > 150):
         print(len(data['a']), len(data['b']))
-        return None
+        return None, None, None, None
     
     with torch.no_grad():
         
@@ -205,20 +241,26 @@ def get_r_t_from_net(settings, model, data):
     g2_result = merge_dict(data_s_2)
 
 
-    confidence_thresh=.0
-    # g1_result['descriptors']=g1_result['descriptors'][g1_result['confidence'][:,0]>0]
-    # g2_result['descriptors']=g2_result['descriptors'][g2_result['confidence'][:,0]>0]
-    # g1_positions = [data['a'][i].positions[np.argmax(g1_result['probabilities'][i].cpu().detach().numpy())] for i in range(len(g1_result['probabilities'])) if data['a'][i].confidence>0]
-    # g2_positions = [data['b'][i].positions[np.argmax(g2_result['probabilities'][i].cpu().detach().numpy())] for i in range(len(g2_result['probabilities'])) if data['b'][i].confidence>0]
-
     g1_positions = [data['a'][i].positions[np.argmax(g1_result['probabilities'][i].cpu().detach().numpy())] for i in range(len(g1_result['probabilities']))]
     g2_positions = [data['b'][i].positions[np.argmax(g2_result['probabilities'][i].cpu().detach().numpy())] for i in range(len(g2_result['probabilities']))]
-    
-    # g1_positions = [data['a'][i].center for i in range(len(g1_result['probabilities']))]
-    # g2_positions = [data['b'][i].center for i in range(len(g2_result['probabilities']))]
 
-    final1  ={'positions': g1_positions, 'descriptors': g1_result['descriptors']}
-    final2 = {'positions': g2_positions, 'descriptors': g2_result['descriptors']}
+    g1_descs = g1_result['descriptors']
+    g2_descs = g2_result['descriptors']
+
+    if _CONFIDENCE_THRESH > 0.0 and 'confidence' in g1_result and 'confidence' in g2_result:
+        c1 = g1_result['confidence'].squeeze(-1).cpu().detach().numpy()
+        c2 = g2_result['confidence'].squeeze(-1).cpu().detach().numpy()
+        keep1 = np.where(c1 > _CONFIDENCE_THRESH)[0]
+        keep2 = np.where(c2 > _CONFIDENCE_THRESH)[0]
+        # Refuse to over-prune: need a healthy minimum of keypoints for RANSAC.
+        if len(keep1) >= 8 and len(keep2) >= 8:
+            g1_positions = [g1_positions[i] for i in keep1]
+            g2_positions = [g2_positions[i] for i in keep2]
+            g1_descs = g1_descs[keep1]
+            g2_descs = g2_descs[keep2]
+
+    final1 = {'positions': g1_positions, 'descriptors': g1_descs}
+    final2 = {'positions': g2_positions, 'descriptors': g2_descs}
 
     descriptorMatcher = DescriptorMatcher()
     setA, setB,ind = descriptorMatcher.match_old(final1, final2,return_id=True)
@@ -272,8 +314,9 @@ def get_r_t_from_net(settings, model, data):
 
 
     estimatedRotation, estimatedTranslation, diff = get_pose_from_two_matching_sets(setA, setB)
+    if estimatedRotation is None or estimatedTranslation is None:
+        return None, None, None, None
 
-    
     if visualize:
         keypoints_o3d_a=o3d.geometry.PointCloud()
         keypoints_o3d_a.points=o3d.utility.Vector3dVector(keysA)
@@ -299,9 +342,15 @@ def get_r_t_from_net(settings, model, data):
     # trans_pr=res.transformation
     
  
-    # estimatedRotation=res.transformation[0:3,0:3]
-    # estimatedTranslation=np.expand_dims(res.transformation[0:3,3],1)
-    res=o3d.registration.registration_icp(pc1_o3d, pc2_o3d,  max_correspondence_distance=0.1, init=trans_pr,estimation_method=o3d.registration.TransformationEstimationPointToPlane())
+    if _ICP_METHOD == 'plane':
+        icp_estimator = o3d.registration.TransformationEstimationPointToPlane()
+    else:
+        icp_estimator = o3d.registration.TransformationEstimationPointToPoint()
+    res = o3d.registration.registration_icp(
+        pc1_o3d, pc2_o3d,
+        max_correspondence_distance=0.1,
+        init=trans_pr,
+        estimation_method=icp_estimator)
     
     if visualize:
         show_with_no_light([pc1_o3d,pc2_o3d])

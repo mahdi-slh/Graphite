@@ -158,6 +158,19 @@ WANDB_PROJECT=my-project python src/train_modelnet.py
 | `GRAPHITE_DATA_ROOT` / `GRAPHITE_MODELS_ROOT` / `GRAPHITE_LOG_ROOT` | Override default `data/`, `models/`, `logs/` |
 | `WANDB_PROJECT` / `WANDB_MODE` | Standard W&B knobs (set `WANDB_MODE=disabled` to silence it) |
 
+### Tuning the SVD+RANSAC and ICP at eval time
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GRAPHITE_RANSAC_INLIER_THRESH` | 0.05 | Inlier threshold for the RANSAC pose solver, in normalised object units |
+| `GRAPHITE_RANSAC_NUM_ITER` | 1000 | Number of RANSAC hypotheses |
+| `GRAPHITE_RANSAC_MIN_SAMPLE` | 4 | Correspondences sampled per hypothesis |
+| `GRAPHITE_RANSAC_ROT_GATE_RAD` | 1.4 | Reject rotations larger than this (radians); training samples up to ~1.36 rad |
+| `GRAPHITE_TRANS_SANITY_MAX` | 1.0 | Drop predictions with `|t| >` this (ground-truth `t` ∈ [-0.5, 0.5]) |
+| `GRAPHITE_CONFIDENCE_THRESH` | 0.0 | Optional keypoint-confidence filter (e.g. 0.2 to drop low-confidence keypoints) |
+| `GRAPHITE_ICP_METHOD` | `plane` | `plane` for point-to-plane, `point` for point-to-point ICP |
+| `GRAPHITE_EVAL_SEED` | 0 | Seeds NumPy / Python RNG before eval; set to `""` for non-deterministic |
+
 ## 4. Evaluation
 
 Two benchmarks are wired up. Both load a checkpoint produced by
